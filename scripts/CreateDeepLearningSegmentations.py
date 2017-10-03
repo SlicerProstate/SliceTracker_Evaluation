@@ -94,6 +94,8 @@ def getVolumesAndLabels(metafile):
 
 def applySegmentations(cases, outputDir):
   numEndoRectalCoil = numNoEndoRectalCoil = 0
+  casesWithEndorectalCoil = []
+  casesNoEndoRectalCoil = []
 
   for caseNumber, data in cases.iteritems():
     if data is None:
@@ -102,9 +104,11 @@ def applySegmentations(cases, outputDir):
 
     if "N4" in data["preop"]["volume"]:
       endorectalCoilUsed = "BWH_WITH_ERC"
+      casesWithEndorectalCoil.append(caseNumber)
       numEndoRectalCoil += 1
     else:
       endorectalCoilUsed = "BWH_WITHOUT_ERC"
+      casesNoEndoRectalCoil.append(caseNumber)
       numNoEndoRectalCoil += 1
 
     slicer.mrmlScene.Clear(0)
@@ -174,6 +178,9 @@ def applySegmentations(cases, outputDir):
 
   print "Number of cases WITH endorectal coil: %s" % numEndoRectalCoil
   print "Number of cases WITHOUT endorectal coil: %s" % numNoEndoRectalCoil
+
+  print "Cases WITH endorectal coil: %s" % sorted(casesWithEndorectalCoil)
+  print "Cases WITHOUT endorectal coil: %s" % sorted(casesNoEndoRectalCoil)
 
 def runRegistration(fixedVolume, fixedLabel, movingVolume, movingLabel):
   registrationLogic = SliceTrackerRegistrationLogic()
