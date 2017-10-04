@@ -163,11 +163,16 @@ def getAutomaticTransformations(data, args):
       print "Path %s does not exist. Please check case %s" % (path, case['case'])
       continue
 
-    expectedFilePath = os.path.join(path, "{}-TRANSFORM-bSpline.h5".format(case['case']))
-    if not os.path.exists(expectedFilePath):
-      print "Path %s does not exist. Please check case %s" % (expectedFilePath, case['case'])
+    regTypes = ['bSpline', 'affine', 'rigid']
+    for regType in regTypes:
+      if not os.path.join(path, "{}-VOLUME-{}{}".format(case['case'], regType, FileExtension.NRRD)):
+        print "Skipping {0} transform of case {1} since there was no {0} volume produced".format(regType, case['case'])
+        continue
 
-    case['transformed_AUTOMATIC'] = expectedFilePath
+      expectedFilePath = os.path.join(path, "{}-TRANSFORM-{}{}".format(case['case'], regType, FileExtension.H5))
+      if not os.path.exists(expectedFilePath):
+        print "Path %s does not exist. Please check case %s" % (expectedFilePath, case['case'])
+      case['transformed_AUTOMATIC'] = expectedFilePath
 
 
 def applyTransformations(data):

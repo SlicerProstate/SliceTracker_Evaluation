@@ -15,15 +15,12 @@ from SliceTrackerRegistration import SliceTrackerRegistrationLogic
 
 # usage: Slicer --python-script CreateDeepLearningSegmentations.py -cr {ProstateCasesArchive} -o {OutputDirectory}
 
+# Slicer --python-script CreateDeepLearningSegmentations.py -cr ~/Dropbox\ \(Partners\ HealthCare\)/ProstateBiopsyCasesArchive/ -o ~/Dropbox\ \(Partners\ HealthCare\)/SliceTracker_Evaluation/Segmentations/
+
 META_FILENAME = 'results.json'
 
 
 def main(argv):
-
-  # Debugging
-  # slicer.app.layoutManager().selectModule("PyDevRemoteDebug")
-  # w = slicer.modules.PyDevRemoteDebugWidget
-  # w.connectButton.click()
 
   try:
     parser = argparse.ArgumentParser(description="Slicetracker Batch DeepLearning Segmentation")
@@ -31,7 +28,14 @@ def main(argv):
                         help="Root directory that holds cases")
     parser.add_argument("-o", "--output-root-directory", dest = "outputRootDir", metavar = "PATH", default = "-", required = True,
                         help="Root directory of output holding sub directories named with case numbers")
+    parser.add_argument("-d", "--debug", action='store_true')
+
     args = parser.parse_args(argv)
+
+    if args.debug:
+      slicer.app.layoutManager().selectModule("PyDevRemoteDebug")
+      w = slicer.modules.PyDevRemoteDebugWidget
+      w.connectButton.click()
 
     metafiles = []
     for root, dirs, files in os.walk(args.caseRootDir):
