@@ -6,14 +6,11 @@ import logging
 import csv
 from SlicerDevelopmentToolboxUtils.mixins import ModuleLogicMixin
 from SliceTrackerUtils.sessionData import *
+import SimpleITK as sitk
+import sitkUtils
 
-# usage: Slicer.exe --no-main-window --python-script CalculateLandmarkRegistrationError.py -ld {LandmarksDirectory}
 
-
-
-validSegmentationEvaluationCases = [278,281,285,295,303,304,306,310,331,333,348,357,358,363,366,370,393,395,398,410,415,
-                                    416,417,423,426,437,438,442,444,445,458,461,514,522,547,560,561,567,570,572,573,576,
-                                    579,580]
+# usage: Slicer.exe --no-main-window --python-script DiceComputation.py -ld {LandmarksDirectory}
 
 
 validForRegistrationAccuracy = [278,281,285,295,303,304,306,310,331,333,348,357,358,363,366,370,393,395,398,410,415,416,
@@ -29,10 +26,6 @@ def main(argv):
                         help="Root directory that lists all cases holding information for landmarks")
     parser.add_argument("-o", "--output-file", dest="outputFile", metavar="PATH", default="-", required=True,
                         help="Output csv file")
-    parser.add_argument("-a", "--allCases", action='store_true',
-                        help="flag for calculating for all cases manual LRE, otherwise automatic LRE")
-    parser.add_argument("-tt", "--transform-type", dest="transformType", metavar="PATH", default="bSpline",
-                        required=False, help="rigid|affine|bSpline")
     parser.add_argument("-d", "--debug", action='store_true')
     args = parser.parse_args(argv)
 
@@ -41,9 +34,9 @@ def main(argv):
       w = slicer.modules.PyDevRemoteDebugWidget
       w.connectButton.click()
 
-    csvData = [['Case','Intraop_Landmark_Name', 'Intraop_Pos','Transformed_Landmark_Name','Transformed_Pos', 'LRE']]
+    csvData = [['Case','Preop', 'Intraop']]
 
-    csvData += getLandmarksLREs(args)
+    csvData += computeDice(args)
 
     csv_writer(csvData, os.path.join(args.landmarkRootDir, args.outputFile))
 
@@ -52,35 +45,62 @@ def main(argv):
   sys.exit(0)
 
 
-def getLandmarksLREs(args):
-  if args.allCases:
-    logging.info("Using all cases for calculation of absolute registration accuracy")
-    validCases = validForRegistrationAccuracy
-    segmentationType = "Manual"
-  else:
-    logging.info("Using only cases for evaluating effect of segmentation on registration accuracy")
-    validCases = validSegmentationEvaluationCases
-    segmentationType = "Automatic"
-
-  transformType = args.transformType
-
+def computeDice(args):
   data = []
   for root, dirs, _ in os.walk(args.landmarkRootDir):
     for case in dirs:
-      if int(case) not in validCases:
-        logging.info("Skipping case %s that is not in list of valid cases" % case)
-        continue
+      caseData =[case]
+      for imageType in ["Preop", "Intraop"]:
+        logging.info("Processing case %s" %case)
+        if int(case) not in validForRegistrationAccuracy:
+          logging.info("Skipping case %s that is not in list of valid cases" % case)
+          continue
 
-      intraopLandmarks = os.path.join(root, case, '{}-IntraopLandmarks.fcsv'.format(case))
-      transformedLandmarks = os.path.join(root, case,
-                                          "{}-PreopLandmarks-transformed-{}-{}.fcsv".format(case, transformType,
-                                                                                            segmentationType))
+        manualLabel = os.path.join(root, case, "{}-{}Manual-label.nrrd".format(case, imageType))
+        automaticLabel = os.path.join(root, case, "{}-{}Automatic-label.nrrd".format(case, imageType))
 
-      if all(os.path.exists(f) for f in [intraopLandmarks, transformedLandmarks]):
-        data += calculateLRE(case, intraopLandmarks, transformedLandmarks)
-      else:
-        print "Data was not found for case %s" % case
+        if all(os.path.exists(f) for f in [manualLabel, automaticLabel]):
+
+          success, manualLabelNode = slicer.util.loadLabelVolume(manualLabel, returnNode=True)
+          success, automaticLabelNode = slicer.util.loadLabelVolume(automaticLabel, returnNode=True)
+          caseData.append(getDice(manualLabelNode, automaticLabelNode))
+        else:
+          print "Data was not found for case %s" % case
+      data.append(caseData)
   return data
+
+
+def runBRAINSResample(inputVolume, referenceVolume):
+  params = {'inputVolume': inputVolume, 'referenceVolume': referenceVolume, 'outputVolume': inputVolume,
+            'interpolationMode': 'NearestNeighbor', 'pixelType':'uchar'}
+
+  logging.debug('About to run BRAINSResample CLI with those params: %s' % params)
+  slicer.cli.run(slicer.modules.brainsresample, None, params, wait_for_completion=True)
+  return inputVolume
+
+def getDice(reference, moving):
+  moving = runBRAINSResample(moving, reference)
+
+  referenceAddress = sitkUtils.GetSlicerITKReadWriteAddress(reference.GetName())
+  image_reference = sitk.ReadImage(referenceAddress)
+
+  movingAddress = sitkUtils.GetSlicerITKReadWriteAddress(moving.GetName())
+  image_input = sitk.ReadImage(movingAddress)
+
+  # make sure both labels have the same value
+  threshold = sitk.BinaryThresholdImageFilter()
+  threshold.SetUpperThreshold(100)
+  threshold.SetLowerThreshold(1)
+  threshold.SetInsideValue(1)
+  image_reference = threshold.Execute(image_reference)
+  image_input = threshold.Execute(image_input)
+
+  measureFilter = sitk.LabelOverlapMeasuresImageFilter()
+  if measureFilter.Execute(image_reference, image_input):
+    print 'filter executed'
+  value = measureFilter.GetDiceCoefficient()
+
+  return value
 
 
 def calculateLRE(case, landmark, transformed):

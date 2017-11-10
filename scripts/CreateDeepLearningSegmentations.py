@@ -1,190 +1,148 @@
 import os
 import sys
 import argparse
-import json
-import logging
-import re
 import slicer
-from collections import OrderedDict
 from SlicerDevelopmentToolboxUtils.mixins import ModuleLogicMixin
-from SlicerDevelopmentToolboxUtils.constants import FileExtension, DICOMTAGS
+from SlicerDevelopmentToolboxUtils.constants import FileExtension
 
 from SliceTrackerUtils.sessionData import *
 from SliceTrackerUtils.algorithms.automaticProstateSegmentation import AutomaticSegmentationLogic
 from SliceTrackerRegistration import SliceTrackerRegistrationLogic
 
-# usage: Slicer --python-script CreateDeepLearningSegmentations.py -cr {ProstateCasesArchive} -o {OutputDirectory}
+# usage: Slicer --python-script CreateDeepLearningSegmentations.py -ld {LandmarksDirectory}
 
-# Slicer --python-script CreateDeepLearningSegmentations.py -cr ~/Dropbox\ \(Partners\ HealthCare\)/ProstateBiopsyCasesArchive/ -o ~/Dropbox\ \(Partners\ HealthCare\)/SliceTracker_Evaluation/Segmentations/
+# Slicer --python-script CreateDeepLearningSegmentations.py -ld ~/Dropbox\ \(Partners\ HealthCare\)/Landmarks/
 
 META_FILENAME = 'results.json'
+
+CasesWithoutERC = [474,494,516,532,537,542,545,551,554,557,559,562,564]
 
 
 def main(argv):
 
-  try:
-    parser = argparse.ArgumentParser(description="Slicetracker Batch DeepLearning Segmentation")
-    parser.add_argument("-cr", "--case-root-directory", dest="caseRootDir", metavar="PATH", default="-", required=True,
-                        help="Root directory that holds cases")
-    parser.add_argument("-o", "--output-root-directory", dest = "outputRootDir", metavar = "PATH", default = "-", required = True,
-                        help="Root directory of output holding sub directories named with case numbers")
-    parser.add_argument("-d", "--debug", action='store_true')
+  parser = argparse.ArgumentParser(description="Slicetracker Batch DeepLearning Segmentation")
+  parser.add_argument("-ld", "--landmark-root-directory", dest="landmarkRootDir", metavar="PATH", default="-",
+                      required=True,
+                      help="Root directory that lists all cases holding information for landmarks")
+  parser.add_argument("-d", "--debug", action='store_true')
 
-    args = parser.parse_args(argv)
+  args = parser.parse_args(argv)
 
-    if args.debug:
-      slicer.app.layoutManager().selectModule("PyDevRemoteDebug")
-      w = slicer.modules.PyDevRemoteDebugWidget
-      w.connectButton.click()
+  if args.debug:
+    slicer.app.layoutManager().selectModule("PyDevRemoteDebug")
+    w = slicer.modules.PyDevRemoteDebugWidget
+    w.connectButton.click()
 
-    metafiles = []
-    for root, dirs, files in os.walk(args.caseRootDir):
-      metafiles = metafiles + [os.path.join(root, f) for f in files if META_FILENAME in f]
+  for root, dirs, _ in os.walk(args.landmarkRootDir):
+    for case in dirs:
+      findDataAndCreateSegmentations(int(case), os.path.join(root, case))
 
+  # import pprint
+  # pprint.pprint(data)
 
-    data = {}
-
-    # find case number
-    # #TODO: handle Case 486
-    for metafile in metafiles:
-      caseNumber = re.search('/Case(.+?)-', metafile).group(1)
-      if not os.path.exists(metafile):
-        raise ValueError("Meta file %s does not exist" % metafile)
-      data[caseNumber] = getVolumesAndLabels(metafile)
-
-    # import pprint
-    # pprint.pprint(data)
-
-    applySegmentations(data, args.outputRootDir)
-
-  except Exception, e:
-    print e
   sys.exit(0)
 
 
-def getVolumesAndLabels(metafile):
+def findDataAndCreateSegmentations(caseNumber, directory):
 
-  with open(metafile) as data_file:
-    data = json.load(data_file)
-    logging.debug("Reading metafile %s" % metafile)
-    path = os.path.dirname(metafile)
+  preopVolume = os.path.join(directory, "{}-Preop.nrrd".format(caseNumber))
+  preopLabel = os.path.join(directory, "{}-PreopManual-label.nrrd".format(caseNumber))
+  intraopVolume = os.path.join(directory, "{}-Intraop.nrrd".format(caseNumber))
+  intraopLabel = os.path.join(directory, "{}-IntraopManual-label.nrrd".format(caseNumber))
+  usedERC = caseNumber not in CasesWithoutERC
 
-    sortedResults = OrderedDict(sorted(data["results"].items(),
-                                       key=lambda t: RegistrationResult.getSeriesNumberFromString(t[0])))
-
-    # IMPORTANT: this code is for the OLD SliceTracker version 1.0!
-    for index, (name, jsonResult) in enumerate(sortedResults.iteritems()):
-      if jsonResult["status"] == RegistrationStatus.APPROVED_STATUS and "COVER PROSTATE" in name:
-        return {
-          "preop": {
-            "volume" : os.path.join(path, jsonResult["movingVolume"]),
-            "used_endorectal_coil": data["VOLUME-PREOP-N4"] is not None,
-            "labels": {
-              "manual": os.path.join(path, jsonResult["movingLabel"]),
-              "automatic": ""
-            }
-          },
-          "intraop": {
-            "volume": os.path.join(path, jsonResult["fixedVolume"]),
-            "labels": {
-              "manual": os.path.join(path, jsonResult["fixedLabel"]),
-              "automatic": ""
-            }
-          }
+  if all(os.path.exists(f) for f in [preopVolume, intraopVolume, preopLabel, intraopLabel]):
+    data = {
+      "caseNumber": caseNumber,
+      "Preop": {
+        "used_endorectal_coil": usedERC,
+        "volume": preopVolume,
+        "labels": {
+          "Manual": preopLabel,
+          "Automatic": os.path.join(directory, "{}-PreopAutomatic-label.nrrd".format(caseNumber))
         }
+      },
+      "Intraop": {
+        "used_endorectal_coil": False,
+        "volume": intraopVolume,
+        "labels": {
+          "Manual": intraopLabel,
+          "Automatic": os.path.join(directory, "{}-IntraopAutomatic-label.nrrd".format(caseNumber))
+        }
+      }
+    }
 
-  return None
-
-
-def applySegmentations(cases, outputDir):
-  numEndoRectalCoil = numNoEndoRectalCoil = 0
-  casesWithEndorectalCoil = []
-  casesNoEndoRectalCoil = []
-
-  for caseNumber, data in cases.iteritems():
-    if data is None:
-      logging.error("Data could not be retrieved for case %s. Please check the meta information for that case" % caseNumber)
-      continue
-
-    if "N4" in data["preop"]["volume"]:
-      endorectalCoilUsed = "BWH_WITH_ERC"
-      casesWithEndorectalCoil.append(caseNumber)
-      numEndoRectalCoil += 1
-    else:
-      endorectalCoilUsed = "BWH_WITHOUT_ERC"
-      casesNoEndoRectalCoil.append(caseNumber)
-      numNoEndoRectalCoil += 1
-
+    createSegmentations(data, directory)
     slicer.mrmlScene.Clear(0)
-    destination = os.path.join(outputDir, caseNumber)
-    if not os.path.exists(destination):
-      ModuleLogicMixin.createDirectory(destination)
+    runRegistrations(data, directory)
+  else:
+    print "Case data was not found for case %s" % caseNumber
 
-    success, preopVolume = slicer.util.loadVolume(data["preop"]["volume"], returnNode=True)
+
+def createSegmentations(data, outputDir):
+    caseNumber = data["caseNumber"]
+
+    for imageType in ["Preop", "Intraop"]:
+
+      automaticLabelPath = data[imageType]["labels"]["Automatic"]
+      if not os.path.exists(automaticLabelPath):
+        logic = AutomaticSegmentationLogic()
+        endorectalCoilUsed = "BWH_WITHOUT_ERC" if data[imageType]["used_endorectal_coil"] is False else "BWH_WITH_ERC"
+        success, volume = slicer.util.loadVolume(data[imageType]["volume"], returnNode=True)
+        automaticLabel = logic.run(volume, domain=endorectalCoilUsed)
+        labelName = "{}-{}Automatic-label".format(caseNumber, imageType)
+        ModuleLogicMixin.saveNodeData(automaticLabel, outputDir, FileExtension.NRRD, name=labelName)
+      else:
+        print "Not running {} segmentation for case {} because label already exists".format(imageType, caseNumber)
+
+      # if not preopAutomaticLabel:
+      #   _, preopAutomaticLabel = slicer.util.loadVolume(preopAutomaticLabelPath, returnNode=True)
+
+
+def runRegistrations(data, destination):
+  caseNumber = data["caseNumber"]
+
+  success, intraopVolume = slicer.util.loadVolume(data["Intraop"]["volume"], returnNode=True)
+  intraopVolume.SetName("{}: IntraopVolume".format(caseNumber))
+
+  for segmentationType in [ "Manual", "Automatic"]:
+
+    success, preopVolume = slicer.util.loadVolume(data["Preop"]["volume"], returnNode=True)
     preopVolume.SetName("{}: PreopVolume".format(caseNumber))
 
-    success, preopManualLabel = slicer.util.loadLabelVolume(data["preop"]["labels"]["manual"], returnNode=True)
-    preopManualLabel.SetName("{}: PreopLabel_Manual".format(caseNumber))
+    success, preopLabel = slicer.util.loadLabelVolume(data["Preop"]["labels"][segmentationType], returnNode=True)
+    preopLabel.SetName("{}: PreopManual-label".format(caseNumber))
 
-    success, intraopVolume = slicer.util.loadVolume(data["intraop"]["volume"], returnNode=True)
-    intraopVolume.SetName("{}: IntraopVolume".format(caseNumber))
+    success, intraopLabel = slicer.util.loadLabelVolume(data["Intraop"]["labels"][segmentationType], returnNode=True)
+    intraopLabel.SetName("{}: IntraopManual-label".format(caseNumber))
 
-    success, intraopManualLabel = slicer.util.loadLabelVolume(data["intraop"]["labels"]["manual"], returnNode=True)
-    intraopManualLabel.SetName("{}: IntraopLabel_Manual".format(caseNumber))
+    if data["Preop"]["used_endorectal_coil"] is True:
+      preopVolume = applyBiasCorrection(preopVolume, preopLabel)
 
-    ModuleLogicMixin.saveNodeData(preopVolume, destination, FileExtension.NRRD, overwrite=False)
-    ModuleLogicMixin.saveNodeData(preopManualLabel, destination, FileExtension.NRRD, overwrite=False)
-    ModuleLogicMixin.saveNodeData(intraopVolume, destination, FileExtension.NRRD, overwrite=False)
-    ModuleLogicMixin.saveNodeData(intraopManualLabel, destination, FileExtension.NRRD, overwrite=False)
-
-    preopAutomaticLabel = None
-    preopAutomaticLabelName = "{}-PreopLabel_Automatic".format(caseNumber)
-    preopAutomaticLabelPath = os.path.join(destination, preopAutomaticLabelName+FileExtension.NRRD)
-    if not os.path.exists(preopAutomaticLabelPath):
-      logic = AutomaticSegmentationLogic()
-
-      # print "Case %s used endorectal coil: %s == %s?" % (caseNumber, endorectalCoilUsed, data["preop"]["used_endorectal_coil"])
-      preopAutomaticLabel = logic.run(preopVolume, domain=endorectalCoilUsed)
-      ModuleLogicMixin.saveNodeData(preopAutomaticLabel, destination, FileExtension.NRRD, name=preopAutomaticLabelName)
-    else:
-      print "Not running preop segmentation for case %s because label already exists" % caseNumber
-
-    if not preopAutomaticLabel:
-      _, preopAutomaticLabel = slicer.util.loadVolume(preopAutomaticLabelPath, returnNode=True)
-
-    intraopAutomaticLabel = None
-    intraopAutomaticLabelName = "{}-IntraopLabel_Automatic".format(caseNumber)
-    intraopAutomaticLabelPath = os.path.join(destination, intraopAutomaticLabelName+FileExtension.NRRD)
-    if not os.path.exists(intraopAutomaticLabelPath):
-      logic = AutomaticSegmentationLogic()
-      intraopAutomaticLabel = logic.run(intraopVolume, domain="BWH_WITHOUT_ERC")
-      ModuleLogicMixin.saveNodeData(intraopAutomaticLabel, destination, FileExtension.NRRD,
-                                    name=intraopAutomaticLabelName)
-    else:
-      print "Not running intraop segmentation for case %s because label already exists" % caseNumber
-
-    if not intraopAutomaticLabel:
-      _, intraopAutomaticLabel = slicer.util.loadVolume(intraopAutomaticLabelPath, returnNode=True)
-
-
-    result = runRegistration(intraopVolume, intraopAutomaticLabel, preopVolume, preopAutomaticLabel)
+    result = runRegistration(intraopVolume, intraopLabel, preopVolume, preopLabel)
 
     if result:
       for regType, transform in result.transforms.asDict().iteritems():
         ModuleLogicMixin.saveNodeData(transform, destination, FileExtension.H5,
-                                      name="{}-TRANSFORM-{}".format(caseNumber, regType))
+                                      name="{}-TRANSFORM-{}-{}".format(caseNumber, regType, segmentationType))
 
       for regType, volume in result.volumes.asDict().iteritems():
         if not regType in ['rigid', 'affine', 'bSpline']:
           continue
         ModuleLogicMixin.saveNodeData(volume, destination, FileExtension.NRRD,
-                                      name="{}-VOLUME-{}".format(caseNumber, regType))
+                                      name="{}-VOLUME-{}-{}".format(caseNumber, regType, segmentationType))
 
-  print "Number of cases WITH endorectal coil: %s" % numEndoRectalCoil
-  print "Number of cases WITHOUT endorectal coil: %s" % numNoEndoRectalCoil
+def applyBiasCorrection(volume, label):
+  outputVolume = slicer.vtkMRMLScalarVolumeNode()
+  outputVolume.SetName('{}-N4'.format(volume.GetName()))
+  slicer.mrmlScene.AddNode(outputVolume)
+  params = {'inputImageName': volume.GetID(),
+            'maskImageName': label.GetID(),
+            'outputImageName': outputVolume.GetID(),
+            'numberOfIterations': '500,400,300'}
 
-  print "Cases WITH endorectal coil: %s" % sorted(casesWithEndorectalCoil)
-  print "Cases WITHOUT endorectal coil: %s" % sorted(casesNoEndoRectalCoil)
+  slicer.cli.run(slicer.modules.n4itkbiasfieldcorrection, None, params, wait_for_completion=True)
+  return outputVolume
 
 def runRegistration(fixedVolume, fixedLabel, movingVolume, movingLabel):
   registrationLogic = SliceTrackerRegistrationLogic()
