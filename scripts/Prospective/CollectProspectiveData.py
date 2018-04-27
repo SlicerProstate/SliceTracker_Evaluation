@@ -5,6 +5,7 @@ import slicer
 import json
 import re
 import csv
+from datetime import datetime
 from SliceTrackerUtils.sessionData import *
 
 
@@ -64,7 +65,7 @@ def collect_general_case_information(metafiles):
     with open(metafile) as data_file:
       data = json.load(data_file)
       events = data['procedureEvents']
-      caseData = list([caseNumber, events['caseStarted'], events['caseCompleted']['time']])
+      caseData = list([caseNumber, formatTime(events['caseStarted']), formatTime(events['caseCompleted']['time'])])
       caseData.append(data.has_key("preop"))
       if not data.has_key("preop"):
         caseData += ['']*4
@@ -95,10 +96,10 @@ def collect_results(metafiles):
         caseData.append(name)
         caseData.append(description)
         caseData.append(result['series']['type'])
-        caseData.append(result['series']['receivedTime'])
+        caseData.append(formatTime(result['series']['receivedTime']))
         status = result["status"]
         caseData.append(status["state"])
-        caseData.append(status["time"])
+        caseData.append(formatTime(status["time"]))
         caseData.append(status["consentGivenBy"] if status.has_key("consentGivenBy") else None)
         caseData.append(status["registrationType"] if status.has_key("registrationType") else None)
 
@@ -112,17 +113,25 @@ def collect_results(metafiles):
   return csvData
 
 
+def formatTime(t):
+  return t
+  try:
+    return datetime.strptime(t, '%Y-%m-%dT%H:%M:%S.%fZ').strftime('%H:%M:%S')
+  except ValueError:
+    return t
+
+
 def get_segmentation_information(root):
   data = list()
   data.append(root["algorithm"])
-  data.append(root["startTime"])
-  data.append(root["endTime"])
+  data.append(formatTime(root["startTime"]))
+  data.append(formatTime(root["endTime"]))
 
   modified = root.has_key('userModified')
   data.append(modified)
   if modified:
-    data.append(root['userModified']['startTime'])
-    data.append(root['userModified']['endTime'])
+    data.append(formatTime(root['userModified']['startTime']))
+    data.append(formatTime(root['userModified']['endTime']))
   return data
 
 
