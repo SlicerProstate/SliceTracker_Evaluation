@@ -1,7 +1,9 @@
 import sys
 import os
 import json
+import csv
 import re
+import vtk
 import argparse
 import logging
 import slicer
@@ -13,11 +15,13 @@ import SimpleITK as sitk
 from SliceTrackerUtils.sessionData import *
 from SlicerDevelopmentToolboxUtils.mixins import ModuleLogicMixin
 from SlicerDevelopmentToolboxUtils.constants import FileExtension
+
 import DeepInfer
+import CurveMaker
 
 # usage: Slicer --python-script CopyNeedleImagesAndData.py -cr {ProstateCasesArchive} -od {outputCaseDirectory}
 
-# Slicer --python-script CopyNeedleImagesAndData.py  -cr "/Users/christian/Dropbox (Partners HealthCare)/SliceTracker_Evaluation/Prospective/ClinicalCases" -od "/Users/christian/Dropbox (Partners HealthCare)/SliceTracker_Evaluation/Prospective/TRE"
+# Slicer --python-script CopyNeedleImagesAndData.py  -cr "/Users/christian/Dropbox (Partners HealthCare)/SliceTracker_Evaluation/Prospective/ClinicalCases" -od "/Users/christian/Dropbox (Partners HealthCare)/SliceTracker_Evaluation/Prospective/TRE" -o "/Users/christian/Dropbox (Partners HealthCare)/SliceTracker_Evaluation/Prospective/TRE.csv"
 
 META_FILENAME = 'results.json'
 
@@ -31,6 +35,8 @@ def main(argv):
   parser.add_argument("-od", "--output-landmarks-directory", dest = "outputCaseDirectory", metavar = "PATH", default = "-",
                       required = True,
                       help="Root directory of output holding sub directories named with case numbers")
+  parser.add_argument("-o", "--output-file", dest="outputFile", metavar="PATH", default="-", required=True,
+                      help="Output csv file")
   parser.add_argument("-d", "--debug", action='store_true')
 
   args = parser.parse_args(argv)
@@ -55,12 +61,25 @@ def main(argv):
     except Exception:
       logging.warn("Errors while reading metafile %s" % metafile)
       continue
+  #
+  # import pprint
+  # pprint.pprint(data)
 
-  import pprint
-  pprint.pprint(data)
+  csvData = copyData(data, args.outputCaseDirectory)
 
-  copyData(data, args.outputCaseDirectory)
+  csv_writer(csvData, os.path.join(args.outputCaseDirectory, args.outputFile))
+
   sys.exit(0)
+
+
+def csv_writer(data, path):
+  """
+  Write data to a CSV file path
+  """
+  with open(path, "wb") as csv_file:
+    writer = csv.writer(csv_file, delimiter=',')
+    for line in data:
+      writer.writerow(line)
 
 
 def getData(metafile):
@@ -94,6 +113,8 @@ def copyData(data, outputDir):
   iodict = parameters.create_iodict(j)
   dockerName, modelName, dataPath = parameters.create_model_info(j)
 
+  csvData = [['Case','SeriesNumber', 'TargetName','Pos','NeedleDistance', 'ErrorVector', 'Comment']]
+
   for case, caseData in data.iteritems():
     if not caseData:
       continue
@@ -121,7 +142,7 @@ def copyData(data, outputDir):
       temp = os.path.join(outputCaseDir, "{}-targets.fcsv".format(seriesNumber))
       if not os.path.exists(temp):
         copy(os.path.join(data["path"], data["targets"]), temp)
-
+      success, targetNode = slicer.util.loadMarkupsFiducialList(temp, returnNode=True)
 
       temp = os.path.join(outputCaseDir, "{}-needle-label.nrrd".format(seriesNumber))
       if not os.path.exists(temp):
@@ -142,23 +163,53 @@ def copyData(data, outputDir):
 
       temp = os.path.join(outputCaseDir, "{}-needle-centerline.fcsv".format(seriesNumber))
       if not os.path.exists(temp):
-        centerLine = CenterLineCalculator(os.path.join(outputCaseDir, "{}-needle-label.nrrd".format(seriesNumber)))
+        centerLine = CenterLinePoints(os.path.join(outputCaseDir, "{}-needle-label.nrrd".format(seriesNumber)))
         points_ijk = centerLine.get_needle_points_ijk()
         points_ras = centerLine.convert_points_ijk_to_ras(points_ijk)
-        centerlineNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode")
+        centerLineNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode")
         for point in points_ras:
-          centerlineNode.AddFiducialFromArray(point)
-        centerlineNode.SetLocked(True)
-        ModuleLogicMixin.saveNodeData(centerlineNode, outputCaseDir, FileExtension.FCSV,
+          centerLineNode.AddFiducialFromArray(point)
+        centerLineNode.SetLocked(True)
+        ModuleLogicMixin.saveNodeData(centerLineNode, outputCaseDir, FileExtension.FCSV,
                                       name="{}-needle-centerline".format(seriesNumber))
+
+      success, centerLineNode = slicer.util.loadMarkupsFiducialList(temp, returnNode=True)
+      if not centerLineNode.GetNumberOfFiducials():
+        csvData.append([case, seriesNumber, "", "", "", "", "No centerline was found"])
+      else:
+        cmLogic = CurveMaker.CurveMakerLogic()
+        cmLogic.DestinationNode = slicer.mrmlScene.CreateNodeByClass("vtkMRMLModelNode")
+        cmLogic.SourceNode = centerLineNode
+        cmLogic.updateCurve()
+
+        cmLogic.CurvePoly = vtk.vtkPolyData()
+        cmLogic.enableAutomaticUpdate(1)
+
+        for idx in range(targetNode.GetNumberOfFiducials()):
+          targetName = targetNode.GetNthFiducialLabel(idx)
+          if targetName.lower() in ["right", "left"]:
+            continue
+          pos = ModuleLogicMixin.getTargetPosition(targetNode, idx)
+          (distance, minErrorVec) = cmLogic.distanceToPoint(pos, True)
+          # print "{}: {} ({})".format(targetName, distance, minErrorVec)
+
+          csvData.append([case, seriesNumber, targetName, pos, distance, minErrorVec, ""])
+
+
+        def cleanup():
+          slicer.mrmlScene.RemoveNode(cmLogic.DestinationNode)
+
+        cleanup()
+
+  return csvData
 
 
 def copy(source, destination):
-  print "Copying from %s to %s" % (source, destination)
+  # print "Copying from %s to %s" % (source, destination)
   shutil.copy(source, destination)
 
 
-class CenterLineCalculator:
+class CenterLinePoints:
 
   def __init__(self, path):
     self.label = sitk.ReadImage(path)
